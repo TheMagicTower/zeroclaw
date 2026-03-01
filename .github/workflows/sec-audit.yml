@@ -90,6 +90,9 @@ jobs:
         name: Security Audit
         runs-on: [self-hosted, aws-india]
         timeout-minutes: 20
+        env:
+            CARGO_HOME: ${{ runner.temp }}/cargo-home
+            RUSTUP_HOME: ${{ runner.temp }}/rustup-home
         steps:
             - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
@@ -107,6 +110,9 @@ jobs:
         name: License & Supply Chain
         runs-on: [self-hosted, aws-india]
         timeout-minutes: 20
+        env:
+            CARGO_HOME: ${{ runner.temp }}/cargo-home
+            RUSTUP_HOME: ${{ runner.temp }}/rustup-home
         steps:
             - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
             - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
@@ -178,6 +184,9 @@ jobs:
         name: Security Regression Tests
         runs-on: [self-hosted, aws-india]
         timeout-minutes: 30
+        env:
+            CARGO_HOME: ${{ runner.temp }}/cargo-home
+            RUSTUP_HOME: ${{ runner.temp }}/rustup-home
         steps:
             - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
             - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
