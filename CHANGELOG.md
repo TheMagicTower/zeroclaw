@@ -8,12 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Security
+- **Process tool excluded by default for non-CLI channels**: The `process` tool is now in `default_non_cli_excluded_tools`, aligning with the existing `shell` exclusion posture. This reduces persistent-approval blast radius for chat-driven channels where `process` could spawn long-running commands.
 - **Legacy XOR cipher migration**: The `enc:` prefix (XOR cipher) is now deprecated. 
   Secrets using this format will be automatically migrated to `enc2:` (ChaCha20-Poly1305 AEAD)
   when decrypted via `decrypt_and_migrate()`. A `tracing::warn!` is emitted when legacy
   values are encountered. The XOR cipher will be removed in a future release.
 
 ### Added
+- **Config editor UI enhancements**: The web UI config.toml editor now has line numbers and TOML syntax highlighting with distinct colors for comments, section headers, keys, strings, numbers, booleans, and datetimes. Also added Tab key support for 4-space indentation.
 - `SecretStore::decrypt_and_migrate()` — Decrypts secrets and returns a migrated `enc2:` 
   value if the input used the legacy `enc:` format
 - `SecretStore::needs_migration()` — Check if a value uses the legacy `enc:` format
