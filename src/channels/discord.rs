@@ -290,13 +290,23 @@ fn is_audio_attachment(content_type: &str, filename: &str, url: &str) -> bool {
 }
 
 fn parse_attachment_duration_secs(attachment: &serde_json::Value) -> Option<u64> {
-    let raw = attachment
-        .get("duration_secs")
-        .and_then(|value| value.as_f64().or_else(|| value.as_u64().map(|v| v as f64)))?;
+    let value = attachment.get("duration_secs")?;
+
+    if let Some(seconds) = value.as_u64() {
+        return Some(seconds);
+    }
+
+    let raw = value.as_f64()?;
     if !raw.is_finite() || raw.is_sign_negative() {
         return None;
     }
-    Some(raw.ceil() as u64)
+
+    let rounded = raw.ceil();
+    if rounded > u64::MAX as f64 {
+        return None;
+    }
+
+    format!("{rounded:.0}").parse().ok()
 }
 
 fn extension_from_media_path(value: &str) -> Option<String> {

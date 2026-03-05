@@ -814,17 +814,17 @@ async fn main() -> Result<()> {
             bail!("--channels-only does not accept --force");
         }
         let config = if channels_only {
-            onboard::run_channels_repair_wizard().await
+            Box::pin(onboard::run_channels_repair_wizard()).await
         } else if interactive {
-            onboard::run_wizard(force).await
+            Box::pin(onboard::run_wizard(force)).await
         } else {
-            onboard::run_quick_setup(
+            Box::pin(onboard::run_quick_setup(
                 api_key.as_deref(),
                 provider.as_deref(),
                 model.as_deref(),
                 memory.as_deref(),
                 force,
-            )
+            ))
             .await
         }?;
         // Auto-start channels if user said yes during wizard
@@ -886,7 +886,7 @@ async fn main() -> Result<()> {
             if let Some(ref backend) = memory_backend {
                 config.memory.backend = backend.clone();
             }
-            agent::run(
+            Box::pin(agent::run(
                 config,
                 message,
                 provider,
@@ -894,7 +894,7 @@ async fn main() -> Result<()> {
                 temperature,
                 peripheral,
                 true,
-            )
+            ))
             .await
             .map(|_| ())
         }

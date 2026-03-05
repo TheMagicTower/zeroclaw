@@ -3350,11 +3350,11 @@ Reminder set successfully."#;
             event_tx: tokio::sync::broadcast::channel(16).0,
         };
 
-        let response = handle_nextcloud_talk_webhook(
+        let response = Box::pin(handle_nextcloud_talk_webhook(
             State(state),
             HeaderMap::new(),
             Bytes::from_static(br#"{"type":"message"}"#),
-        )
+        ))
         .await
         .into_response();
 
@@ -3419,9 +3419,13 @@ Reminder set successfully."#;
             HeaderValue::from_str(invalid_signature).unwrap(),
         );
 
-        let response = handle_nextcloud_talk_webhook(State(state), headers, Bytes::from(body))
-            .await
-            .into_response();
+        let response = Box::pin(handle_nextcloud_talk_webhook(
+            State(state),
+            headers,
+            Bytes::from(body),
+        ))
+        .await
+        .into_response();
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
         assert_eq!(provider_impl.calls.load(Ordering::SeqCst), 0);
     }
@@ -3461,11 +3465,11 @@ Reminder set successfully."#;
             event_tx: tokio::sync::broadcast::channel(16).0,
         };
 
-        let response = handle_qq_webhook(
+        let response = Box::pin(handle_qq_webhook(
             State(state),
             HeaderMap::new(),
             Bytes::from_static(br#"{"op":13,"d":{"plain_token":"p","event_ts":"1"}}"#),
-        )
+        ))
         .await
         .into_response();
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
@@ -3515,13 +3519,13 @@ Reminder set successfully."#;
         let mut headers = HeaderMap::new();
         headers.insert("X-Bot-Appid", HeaderValue::from_static("11111111"));
 
-        let response = handle_qq_webhook(
+        let response = Box::pin(handle_qq_webhook(
             State(state),
             headers,
             Bytes::from_static(
                 br#"{"op":13,"d":{"plain_token":"Arq0D5A61EgUu4OxUvOp","event_ts":"1725442341"}}"#,
             ),
-        )
+        ))
         .await
         .into_response();
         assert_eq!(response.status(), StatusCode::OK);
