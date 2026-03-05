@@ -671,11 +671,11 @@ impl Default for AgentConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum SkillsPromptInjectionMode {
-    /// Inline full skill instructions and tool metadata into the system prompt.
-    #[default]
-    Full,
     /// Inline only compact skill metadata (name/description/location) and load details on demand.
+    #[default]
     Compact,
+    /// Inline full skill instructions and tool metadata into the system prompt.
+    Full,
 }
 
 fn parse_skills_prompt_injection_mode(raw: &str) -> Option<SkillsPromptInjectionMode> {
@@ -698,7 +698,8 @@ pub struct SkillsConfig {
     #[serde(default)]
     pub open_skills_dir: Option<String>,
     /// Controls how skills are injected into the system prompt.
-    /// `full` preserves legacy behavior. `compact` keeps context small and loads skills on demand.
+    /// `compact` (default) keeps context small and loads skills on demand.
+    /// `full` preserves legacy behavior as an opt-in.
     #[serde(default)]
     pub prompt_injection_mode: SkillsPromptInjectionMode,
 }
@@ -6627,7 +6628,7 @@ mod tests {
         assert!(!c.skills.open_skills_enabled);
         assert_eq!(
             c.skills.prompt_injection_mode,
-            SkillsPromptInjectionMode::Full
+            SkillsPromptInjectionMode::Compact
         );
         assert!(c.workspace_dir.to_string_lossy().contains("workspace"));
         assert!(c.config_path.to_string_lossy().contains("config.toml"));
@@ -8733,7 +8734,7 @@ requires_openai_auth = true
         assert!(config.skills.open_skills_dir.is_none());
         assert_eq!(
             config.skills.prompt_injection_mode,
-            SkillsPromptInjectionMode::Full
+            SkillsPromptInjectionMode::Compact
         );
 
         std::env::set_var("ZEROCLAW_OPEN_SKILLS_ENABLED", "true");

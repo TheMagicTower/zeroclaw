@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use directories::UserDirs;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::io::IsTerminal;
+use std::io::{BufRead, IsTerminal};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, SystemTime};
@@ -142,6 +142,11 @@ struct SkillManifest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+struct SkillMetadataManifest {
+    skill: SkillMeta,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct SkillMeta {
     name: String,
     description: String,
@@ -157,9 +162,24 @@ fn default_version() -> String {
     "0.1.0".to_string()
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SkillLoadMode {
+    Full,
+    MetadataOnly,
+}
+
+impl SkillLoadMode {
+    fn from_prompt_mode(mode: crate::config::SkillsPromptInjectionMode) -> Self {
+        match mode {
+            crate::config::SkillsPromptInjectionMode::Full => Self::Full,
+            crate::config::SkillsPromptInjectionMode::Compact => Self::MetadataOnly,
+        }
+    }
+}
+
 /// Load all skills from the workspace skills directory
 pub fn load_skills(workspace_dir: &Path) -> Vec<Skill> {
-    load_skills_with_open_skills_config(workspace_dir, None, None)
+    load_skills_with_open_skills_config(workspace_dir, None, None, SkillLoadMode::Full)
 }
 
 /// Load skills using runtime config values (preferred at runtime).
@@ -168,6 +188,19 @@ pub fn load_skills_with_config(workspace_dir: &Path, config: &crate::config::Con
         workspace_dir,
         Some(config.skills.open_skills_enabled),
         config.skills.open_skills_dir.as_deref(),
+        SkillLoadMode::from_prompt_mode(config.skills.prompt_injection_mode),
+    )
+}
+
+fn load_skills_full_with_config(
+    workspace_dir: &Path,
+    config: &crate::config::Config,
+) -> Vec<Skill> {
+    load_skills_with_open_skills_config(
+        workspace_dir,
+        Some(config.skills.open_skills_enabled),
+        config.skills.open_skills_dir.as_deref(),
+        SkillLoadMode::Full,
     )
 }
 
@@ -175,25 +208,26 @@ fn load_skills_with_open_skills_config(
     workspace_dir: &Path,
     config_open_skills_enabled: Option<bool>,
     config_open_skills_dir: Option<&str>,
+    load_mode: SkillLoadMode,
 ) -> Vec<Skill> {
     let mut skills = Vec::new();
 
     if let Some(open_skills_dir) =
         ensure_open_skills_repo(config_open_skills_enabled, config_open_skills_dir)
     {
-        skills.extend(load_open_skills(&open_skills_dir));
+        skills.extend(load_open_skills(&open_skills_dir, load_mode));
     }
 
-    skills.extend(load_workspace_skills(workspace_dir));
+    skills.extend(load_workspace_skills(workspace_dir, load_mode));
     skills
 }
 
-fn load_workspace_skills(workspace_dir: &Path) -> Vec<Skill> {
+fn load_workspace_skills(workspace_dir: &Path, load_mode: SkillLoadMode) -> Vec<Skill> {
     let skills_dir = workspace_dir.join("skills");
-    load_skills_from_directory(&skills_dir)
+    load_skills_from_directory(&skills_dir, load_mode)
 }
 
-fn load_skills_from_directory(skills_dir: &Path) -> Vec<Skill> {
+fn load_skills_from_directory(skills_dir: &Path, load_mode: SkillLoadMode) -> Vec<Skill> {
     if !skills_dir.exists() {
         return Vec::new();
     }
@@ -234,11 +268,11 @@ fn load_skills_from_directory(skills_dir: &Path) -> Vec<Skill> {
         let md_path = path.join("SKILL.md");
 
         if manifest_path.exists() {
-            if let Ok(skill) = load_skill_toml(&manifest_path) {
+            if let Ok(skill) = load_skill_toml(&manifest_path, load_mode) {
                 skills.push(skill);
             }
         } else if md_path.exists() {
-            if let Ok(skill) = load_skill_md(&md_path, &path) {
+            if let Ok(skill) = load_skill_md(&md_path, &path, load_mode) {
                 skills.push(skill);
             }
         }
@@ -247,13 +281,13 @@ fn load_skills_from_directory(skills_dir: &Path) -> Vec<Skill> {
     skills
 }
 
-fn load_open_skills(repo_dir: &Path) -> Vec<Skill> {
+fn load_open_skills(repo_dir: &Path, load_mode: SkillLoadMode) -> Vec<Skill> {
     // Modern open-skills layout stores skill packages in `skills/<name>/SKILL.md`.
     // Prefer that structure to avoid treating repository docs (e.g. CONTRIBUTING.md)
     // as executable skills.
     let nested_skills_dir = repo_dir.join("skills");
     if nested_skills_dir.is_dir() {
-        return load_skills_from_directory(&nested_skills_dir);
+        return load_skills_from_directory(&nested_skills_dir, load_mode);
     }
 
     let mut skills = Vec::new();
@@ -303,7 +337,7 @@ fn load_open_skills(repo_dir: &Path) -> Vec<Skill> {
             }
         }
 
-        if let Ok(skill) = load_open_skill_md(&path) {
+        if let Ok(skill) = load_open_skill_md(&path, load_mode) {
             skills.push(skill);
         }
     }
@@ -487,59 +521,91 @@ fn mark_open_skills_synced(repo_dir: &Path) -> Result<()> {
 }
 
 /// Load a skill from a SKILL.toml manifest
-fn load_skill_toml(path: &Path) -> Result<Skill> {
+fn load_skill_toml(path: &Path, load_mode: SkillLoadMode) -> Result<Skill> {
     let content = std::fs::read_to_string(path)?;
-    let manifest: SkillManifest = toml::from_str(&content)?;
+    match load_mode {
+        SkillLoadMode::Full => {
+            let manifest: SkillManifest = toml::from_str(&content)?;
 
-    Ok(Skill {
-        name: manifest.skill.name,
-        description: manifest.skill.description,
-        version: manifest.skill.version,
-        author: manifest.skill.author,
-        tags: manifest.skill.tags,
-        tools: manifest.tools,
-        prompts: manifest.prompts,
-        location: Some(path.to_path_buf()),
-    })
+            Ok(Skill {
+                name: manifest.skill.name,
+                description: manifest.skill.description,
+                version: manifest.skill.version,
+                author: manifest.skill.author,
+                tags: manifest.skill.tags,
+                tools: manifest.tools,
+                prompts: manifest.prompts,
+                location: Some(path.to_path_buf()),
+            })
+        }
+        SkillLoadMode::MetadataOnly => {
+            let manifest: SkillMetadataManifest = toml::from_str(&content)?;
+
+            Ok(Skill {
+                name: manifest.skill.name,
+                description: manifest.skill.description,
+                version: manifest.skill.version,
+                author: manifest.skill.author,
+                tags: manifest.skill.tags,
+                tools: Vec::new(),
+                prompts: Vec::new(),
+                location: Some(path.to_path_buf()),
+            })
+        }
+    }
 }
 
 /// Load a skill from a SKILL.md file (simpler format)
-fn load_skill_md(path: &Path, dir: &Path) -> Result<Skill> {
-    let content = std::fs::read_to_string(path)?;
+fn load_skill_md(path: &Path, dir: &Path, load_mode: SkillLoadMode) -> Result<Skill> {
     let name = dir
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("unknown")
         .to_string();
 
+    let (description, prompts) = match load_mode {
+        SkillLoadMode::Full => {
+            let content = std::fs::read_to_string(path)?;
+            (extract_description(&content), vec![content])
+        }
+        SkillLoadMode::MetadataOnly => (extract_description_from_markdown(path)?, Vec::new()),
+    };
+
     Ok(Skill {
         name,
-        description: extract_description(&content),
+        description,
         version: "0.1.0".to_string(),
         author: None,
         tags: Vec::new(),
         tools: Vec::new(),
-        prompts: vec![content],
+        prompts,
         location: Some(path.to_path_buf()),
     })
 }
 
-fn load_open_skill_md(path: &Path) -> Result<Skill> {
-    let content = std::fs::read_to_string(path)?;
+fn load_open_skill_md(path: &Path, load_mode: SkillLoadMode) -> Result<Skill> {
     let name = path
         .file_stem()
         .and_then(|n| n.to_str())
         .unwrap_or("open-skill")
         .to_string();
 
+    let (description, prompts) = match load_mode {
+        SkillLoadMode::Full => {
+            let content = std::fs::read_to_string(path)?;
+            (extract_description(&content), vec![content])
+        }
+        SkillLoadMode::MetadataOnly => (extract_description_from_markdown(path)?, Vec::new()),
+    };
+
     Ok(Skill {
         name,
-        description: extract_description(&content),
+        description,
         version: "open-skills".to_string(),
         author: Some("besoeasy/open-skills".to_string()),
         tags: vec!["open-skills".to_string()],
         tools: Vec::new(),
-        prompts: vec![content],
+        prompts,
         location: Some(path.to_path_buf()),
     })
 }
@@ -551,6 +617,20 @@ fn extract_description(content: &str) -> String {
         .unwrap_or("No description")
         .trim()
         .to_string()
+}
+
+fn extract_description_from_markdown(path: &Path) -> Result<String> {
+    let file = std::fs::File::open(path)?;
+    let reader = std::io::BufReader::new(file);
+    for line in reader.lines() {
+        let line = line?;
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        return Ok(trimmed.to_string());
+    }
+    Ok("No description".to_string())
 }
 
 fn append_xml_escaped(out: &mut String, text: &str) {
@@ -1284,7 +1364,7 @@ pub fn handle_command(command: crate::SkillCommands, config: &crate::config::Con
     let workspace_dir = &config.workspace_dir;
     match command {
         crate::SkillCommands::List => {
-            let skills = load_skills_with_config(workspace_dir, config);
+            let skills = load_skills_full_with_config(workspace_dir, config);
             if skills.is_empty() {
                 println!("No skills installed.");
                 println!();
@@ -1529,6 +1609,63 @@ command = "echo hello"
         assert_eq!(skills.len(), 1);
         assert_eq!(skills[0].name, "md-skill");
         assert!(skills[0].description.contains("cool things"));
+    }
+
+    #[test]
+    fn load_skills_with_config_compact_mode_uses_metadata_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let skills_dir = dir.path().join("skills");
+
+        let md_skill = skills_dir.join("md-meta");
+        fs::create_dir_all(&md_skill).unwrap();
+        fs::write(
+            md_skill.join("SKILL.md"),
+            "# Metadata\nMetadata summary line\nUse this only when needed.\n",
+        )
+        .unwrap();
+
+        let toml_skill = skills_dir.join("toml-meta");
+        fs::create_dir_all(&toml_skill).unwrap();
+        fs::write(
+            toml_skill.join("SKILL.toml"),
+            r#"
+[skill]
+name = "toml-meta"
+description = "Toml metadata description"
+version = "1.2.3"
+
+[[tools]]
+name = "dangerous-tool"
+description = "Should not preload"
+kind = "shell"
+command = "echo no"
+
+prompts = ["Do not preload me"]
+"#,
+        )
+        .unwrap();
+
+        let mut config = crate::config::Config::default();
+        config.workspace_dir = dir.path().to_path_buf();
+        config.skills.prompt_injection_mode = crate::config::SkillsPromptInjectionMode::Compact;
+
+        let mut skills = load_skills_with_config(dir.path(), &config);
+        skills.sort_by(|a, b| a.name.cmp(&b.name));
+
+        assert_eq!(skills.len(), 2);
+
+        let md = skills.iter().find(|skill| skill.name == "md-meta").unwrap();
+        assert_eq!(md.description, "Metadata summary line");
+        assert!(md.prompts.is_empty());
+        assert!(md.tools.is_empty());
+
+        let toml = skills
+            .iter()
+            .find(|skill| skill.name == "toml-meta")
+            .unwrap();
+        assert_eq!(toml.description, "Toml metadata description");
+        assert!(toml.prompts.is_empty());
+        assert!(toml.tools.is_empty());
     }
 
     #[test]
