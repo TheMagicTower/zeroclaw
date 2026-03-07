@@ -161,7 +161,7 @@ jobs:
             --title "${{ needs.validate.outputs.tag }}" \
             --latest \
             --generate-notes \
-            artifacts/**/*.tar.gz artifacts/**/*.zip artifacts/**/SHA256SUMS
+            artifacts/*/*.tar.gz artifacts/*/*.zip artifacts/SHA256SUMS
 
   docker:
     name: Push Docker Image
