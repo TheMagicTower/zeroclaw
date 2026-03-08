@@ -1,3 +1,23 @@
+<blockquote>
+<h2>This is an unofficial fork of <a href="https://github.com/zeroclaw-labs/zeroclaw">zeroclaw-labs/zeroclaw</a>.</h2>
+<p>This fork is maintained by <a href="https://github.com/TheMagicTower">TheMagicTower</a> for internal use and experimentation. It may be incomplete, unstable, or diverge from upstream at any time. For the official project, please refer to the <a href="https://github.com/zeroclaw-labs/zeroclaw">upstream repository</a>.</p>
+</blockquote>
+
+---
+
+## Fork Changes (vs upstream)
+
+| Feature | Description |
+|---|---|
+| **MiniMax M2.5 Tool Call Parser** | Nested XML parser for `<tool>/<param>/<arg>` tags. Enables tool calling with MiniMax M2.5 model. |
+| **Webhook Tool Execution** | `POST /webhook` now runs the full agent loop (tool parsing + execution), not just a single LLM call. |
+| **WebSocket Tool Execution** | `/ws/chat` upgraded to full agent loop with tool execution, matching webhook behavior. |
+| **WebSocket Cancel** | Client sends `{"type":"cancel"}` to abort in-flight agent tasks. Server responds `{"type":"cancelled"}`. |
+| **Gateway File Logging** | Timestamped request/response logs to `~/.zeroclaw/logs/gateway.log` with daily rotation (7-day retention). |
+| **Desktop Client (macOS)** | Native Swift client available at [zeroclaw-desktop-client-mac-swift](https://github.com/TheMagicTower/zeroclaw-desktop-client-mac-swift). |
+
+---
+
 <p align="center">
   <img src="zeroclaw.png" alt="ZeroClaw" width="200" />
 </p>
@@ -55,28 +75,6 @@ Built by students and members of the Harvard, MIT, and Sundai.Club communities.
 </p>
 
 <p align="center"><code>Trait-driven architecture · secure-by-default runtime · provider/channel/tool swappable · pluggable everything</code></p>
-
-### 🔧 TheMagicTower Fork — Added Features
-
-This fork ([TheMagicTower/zeroclaw](https://github.com/TheMagicTower/zeroclaw)) extends the upstream ZeroClaw with the following changes:
-
-#### MiniMax M2.5 XML Tool Call Support
-- **Dispatcher** (`src/agent/dispatcher.rs`): Added `parse_nested_xml_tool_call` fallback parser that handles MiniMax M2.5's `<tool name="..."><param name="...">value</param></tool>` output format, in addition to the original JSON-inside-`<tool_call>` format.
-- **Agent Loop** (`src/agent/loop_.rs`): Extended `MINIMAX_INVOKE_RE` and `MINIMAX_PARAMETER_RE` regexes to match `<tool>`, `<param>`, and `<arg>` tags alongside the original `<invoke>`/`<parameter>` tags.
-
-#### Webhook Tool Execution
-- **Gateway** (`src/gateway/mod.rs`): Changed `POST /webhook` handler from `run_gateway_chat_simple` (single LLM call, no tools) to `run_gateway_chat_with_tools` (full agent loop with tool parsing and execution).
-
-#### WebSocket Tool Execution + Cancel Support
-- **WebSocket** (`src/gateway/ws.rs`): Upgraded from single-turn LLM chat to full agent loop with tool execution (same as webhook).
-- **Cancel**: Client can send `{"type":"cancel"}` during processing to abort the current agent task. Server responds with `{"type":"cancelled"}`. Implemented via `CancellationToken` + `tokio::select!` with a dedicated receiver task.
-
-#### Gateway Request/Response File Logging
-- **Gateway** (`src/gateway/mod.rs`): Added `gateway_file_log()` that writes timestamped `REQUEST`/`RESPONSE` entries to `~/.zeroclaw/logs/gateway.log`.
-- **WebSocket** (`src/gateway/ws.rs`): Logs `WS_REQUEST`/`WS_RESPONSE`/`WS_RESPONSE status=cancelled` entries to the same log file.
-- **Log Rotation**: Logrotate config at `~/.zeroclaw/logs/logrotate.conf` — daily compression, 7-day retention, cron at 00:03 UTC.
-
----
 
 ### 📢 Announcements
 
