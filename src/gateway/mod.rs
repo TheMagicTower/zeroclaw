@@ -54,6 +54,27 @@ pub const RATE_LIMIT_MAX_KEYS_DEFAULT: usize = 10_000;
 /// Fallback max distinct idempotency keys retained in gateway memory.
 pub const IDEMPOTENCY_MAX_KEYS_DEFAULT: usize = 10_000;
 
+/// Append a timestamped line to the gateway log file.
+/// Uses a fixed path under the ZeroClaw data directory. Failures are silently
+/// ignored so logging never breaks request handling.
+pub(crate) fn gateway_file_log(entry: &str) {
+    use std::io::Write;
+    let log_path = directories::BaseDirs::new()
+        .map(|d| d.home_dir().join(".zeroclaw/logs/gateway.log"))
+        .unwrap_or_else(|| std::path::PathBuf::from("/tmp/zeroclaw-gateway.log"));
+    if let Some(parent) = log_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+    {
+        let ts = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S%.3f%z");
+        let _ = writeln!(f, "[{ts}] {entry}");
+    }
+}
+
 fn webhook_memory_key() -> String {
     format!("webhook_msg_{}", Uuid::new_v4())
 }
@@ -860,7 +881,7 @@ async fn run_gateway_chat_simple(state: &AppState, message: &str) -> anyhow::Res
 }
 
 /// Full-featured chat with tools for channel handlers (WhatsApp, Linq, Nextcloud Talk).
-async fn run_gateway_chat_with_tools(state: &AppState, message: &str) -> anyhow::Result<String> {
+pub(crate) async fn run_gateway_chat_with_tools(state: &AppState, message: &str) -> anyhow::Result<String> {
     let config = state.config.lock().clone();
     crate::agent::process_message(config, message).await
 }
@@ -955,6 +976,13 @@ async fn handle_webhook(
 
     let message = &webhook_body.message;
 
+    // ── Gateway request/response file logging ──
+    let log_peer = peer_addr.ip();
+    gateway_file_log(&format!(
+        "REQUEST  peer={log_peer} message={}",
+        truncate_with_ellipsis(message, 500),
+    ));
+
     if state.auto_save {
         let key = webhook_memory_key();
         let _ = state
@@ -986,7 +1014,7 @@ async fn handle_webhook(
             messages_count: 1,
         });
 
-    match run_gateway_chat_simple(&state, message).await {
+    match run_gateway_chat_with_tools(&state, message).await {
         Ok(response) => {
             let duration = started_at.elapsed();
             state
@@ -1013,6 +1041,12 @@ async fn handle_webhook(
                     cost_usd: None,
                 });
 
+            gateway_file_log(&format!(
+                "RESPONSE peer={log_peer} status=200 duration={:.2}s model={} response={}",
+                duration.as_secs_f64(),
+                state.model,
+                truncate_with_ellipsis(&response, 500),
+            ));
             let body = serde_json::json!({"response": response, "model": state.model});
             (StatusCode::OK, Json(body))
         }
@@ -1051,6 +1085,11 @@ async fn handle_webhook(
                 });
 
             tracing::error!("Webhook provider error: {}", sanitized);
+            gateway_file_log(&format!(
+                "RESPONSE peer={log_peer} status=500 duration={:.2}s error={}",
+                duration.as_secs_f64(),
+                truncate_with_ellipsis(&sanitized, 500),
+            ));
             let err = serde_json::json!({"error": "LLM request failed"});
             (StatusCode::INTERNAL_SERVER_ERROR, Json(err))
         }

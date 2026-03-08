@@ -64,8 +64,19 @@ impl XmlToolDispatcher {
                             tool_call_id: None,
                         });
                     }
-                    Err(e) => {
-                        tracing::warn!("Malformed <tool_call> JSON: {e}");
+                    Err(_) => {
+                        // Fallback: parse nested-XML tool calls emitted by some
+                        // models (e.g. MiniMax):
+                        //   <tool_call>
+                        //   <tool name="shell">
+                        //   <arg name="command">ls</arg>
+                        //   </tool>
+                        //   </tool_call>
+                        if let Some(call) = Self::parse_nested_xml_tool_call(inner) {
+                            calls.push(call);
+                        } else {
+                            tracing::warn!("Malformed <tool_call> content, could not parse as JSON or nested XML");
+                        }
                     }
                 }
                 remaining = &remaining[start + end + 12..];
@@ -79,6 +90,68 @@ impl XmlToolDispatcher {
         }
 
         (text_parts.join("\n"), calls)
+    }
+
+    /// Parse nested-XML tool call format. Handles both `<arg>` and `<param>` tags:
+    ///   <tool name="tool_name">
+    ///   <arg name="key">value</arg>
+    ///   <param name="key">value</param>
+    ///   </tool>
+    fn parse_nested_xml_tool_call(inner: &str) -> Option<ParsedToolCall> {
+        let trimmed = inner.trim();
+        // Extract tool name from <tool name="...">
+        let tool_open = trimmed.find("<tool ")?;
+        let after_tool = &trimmed[tool_open..];
+        let name_start = after_tool.find("name=\"")? + 6;
+        let name_end = after_tool[name_start..].find('"')?;
+        let name = after_tool[name_start..name_start + name_end].to_string();
+        if name.is_empty() {
+            return None;
+        }
+
+        // Extract all <arg>/<param> name="key">value</...> pairs
+        let mut arguments = serde_json::Map::new();
+        let mut search = trimmed;
+        loop {
+            // Find the next <arg or <param tag, whichever comes first
+            let arg_pos = search.find("<arg ");
+            let param_pos = search.find("<param ");
+            let (tag_start, close_tag) = match (arg_pos, param_pos) {
+                (Some(a), Some(p)) if a <= p => (a, "</arg>"),
+                (Some(_), Some(p)) => (p, "</param>"),
+                (Some(a), None) => (a, "</arg>"),
+                (None, Some(p)) => (p, "</param>"),
+                (None, None) => break,
+            };
+
+            let after_tag = &search[tag_start..];
+            let Some(attr_name_start) = after_tag.find("name=\"").map(|i| i + 6) else {
+                break;
+            };
+            let Some(attr_name_end) = after_tag[attr_name_start..].find('"') else {
+                break;
+            };
+            let attr_name = &after_tag[attr_name_start..attr_name_start + attr_name_end];
+
+            let Some(value_start) = after_tag.find('>').map(|i| i + 1) else {
+                break;
+            };
+            let Some(value_end) = after_tag[value_start..].find(close_tag) else {
+                break;
+            };
+            let value = &after_tag[value_start..value_start + value_end];
+            arguments.insert(
+                attr_name.to_string(),
+                Value::String(value.to_string()),
+            );
+            search = &after_tag[value_start + value_end + close_tag.len()..];
+        }
+
+        Some(ParsedToolCall {
+            name,
+            arguments: Value::Object(arguments),
+            tool_call_id: None,
+        })
     }
 
     pub fn tool_specs(tools: &[Box<dyn Tool>]) -> Vec<ToolSpec> {
@@ -257,6 +330,61 @@ mod tests {
         let (_, calls) = dispatcher.parse_response(&response);
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].name, "shell");
+    }
+
+    #[test]
+    fn xml_dispatcher_parses_nested_xml_with_arg_tags() {
+        let response = ChatResponse {
+            text: Some(
+                "<tool_call>\n<tool name=\"shell\">\n<arg name=\"command\">ls -la</arg>\n</tool>\n</tool_call>"
+                    .into(),
+            ),
+            tool_calls: vec![],
+            usage: None,
+            reasoning_content: None,
+        };
+        let dispatcher = XmlToolDispatcher;
+        let (_, calls) = dispatcher.parse_response(&response);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "shell");
+        assert_eq!(calls[0].arguments["command"], "ls -la");
+    }
+
+    #[test]
+    fn xml_dispatcher_parses_nested_xml_with_param_tags() {
+        let response = ChatResponse {
+            text: Some(
+                "<tool_call>\n<tool name=\"shell\">\n<param name=\"command\">gh --version</param>\n</tool>\n</tool_call>"
+                    .into(),
+            ),
+            tool_calls: vec![],
+            usage: None,
+            reasoning_content: None,
+        };
+        let dispatcher = XmlToolDispatcher;
+        let (_, calls) = dispatcher.parse_response(&response);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "shell");
+        assert_eq!(calls[0].arguments["command"], "gh --version");
+    }
+
+    #[test]
+    fn xml_dispatcher_parses_nested_xml_multiple_params() {
+        let response = ChatResponse {
+            text: Some(
+                "<tool_call>\n<tool name=\"file_write\">\n<param name=\"path\">test.txt</param>\n<param name=\"content\">hello</param>\n</tool>\n</tool_call>"
+                    .into(),
+            ),
+            tool_calls: vec![],
+            usage: None,
+            reasoning_content: None,
+        };
+        let dispatcher = XmlToolDispatcher;
+        let (_, calls) = dispatcher.parse_response(&response);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "file_write");
+        assert_eq!(calls[0].arguments["path"], "test.txt");
+        assert_eq!(calls[0].arguments["content"], "hello");
     }
 
     #[test]

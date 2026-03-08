@@ -3,10 +3,12 @@
 //! Protocol:
 //! ```text
 //! Client -> Server: {"type":"message","content":"Hello"}
+//! Client -> Server: {"type":"cancel"}
 //! Server -> Client: {"type":"chunk","content":"Hi! "}
 //! Server -> Client: {"type":"tool_call","name":"shell","args":{...}}
 //! Server -> Client: {"type":"tool_result","name":"shell","output":"..."}
 //! Server -> Client: {"type":"done","full_response":"..."}
+//! Server -> Client: {"type":"cancelled"}
 //! ```
 
 use super::AppState;
@@ -19,6 +21,7 @@ use axum::{
 };
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
+use tokio_util::sync::CancellationToken;
 
 #[derive(Deserialize)]
 pub struct WsQuery {
@@ -50,35 +53,69 @@ pub async fn handle_ws_chat(
 async fn handle_socket(socket: WebSocket, state: AppState) {
     let (mut sender, mut receiver) = socket.split();
 
-    while let Some(msg) = receiver.next().await {
-        let msg = match msg {
-            Ok(Message::Text(text)) => text,
-            Ok(Message::Close(_)) => break,
-            Err(_) => break,
-            _ => continue,
-        };
+    // Channel for forwarding non-cancel messages from the receiver task
+    let (msg_tx, mut msg_rx) = tokio::sync::mpsc::channel::<String>(16);
+    // Cancellation token shared between receiver listener and agent task
+    let cancel = CancellationToken::new();
 
-        // Parse incoming message
-        let parsed: serde_json::Value = match serde_json::from_str(&msg) {
-            Ok(v) => v,
-            Err(_) => {
-                let err = serde_json::json!({"type": "error", "message": "Invalid JSON"});
-                let _ = sender.send(Message::Text(err.to_string().into())).await;
-                continue;
+    // Spawn a task that continuously reads from the WebSocket receiver.
+    // This keeps reading even while the agent is processing, so we can
+    // detect cancel requests mid-flight.
+    let cancel_clone = cancel.clone();
+    let recv_handle = tokio::spawn(async move {
+        while let Some(msg) = receiver.next().await {
+            let text = match msg {
+                Ok(Message::Text(t)) => t,
+                Ok(Message::Close(_)) => break,
+                Err(_) => break,
+                _ => continue,
+            };
+
+            let parsed: serde_json::Value = match serde_json::from_str(&text) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+
+            match parsed["type"].as_str().unwrap_or("") {
+                "cancel" => {
+                    cancel_clone.cancel();
+                }
+                "message" => {
+                    if msg_tx.send(text.to_string()).await.is_err() {
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+    });
+
+    // Main loop: wait for incoming messages and process them
+    loop {
+        let content = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => break,
+            msg = msg_rx.recv() => {
+                match msg {
+                    Some(raw) => {
+                        let parsed: serde_json::Value =
+                            match serde_json::from_str(&raw) {
+                                Ok(v) => v,
+                                Err(_) => continue,
+                            };
+                        let c = parsed["content"].as_str().unwrap_or("").to_string();
+                        if c.is_empty() { continue; }
+                        c
+                    }
+                    None => break, // receiver task ended
+                }
             }
         };
 
-        let msg_type = parsed["type"].as_str().unwrap_or("");
-        if msg_type != "message" {
-            continue;
-        }
+        super::gateway_file_log(&format!("WS_REQUEST  message={content}"));
 
-        let content = parsed["content"].as_str().unwrap_or("").to_string();
-        if content.is_empty() {
-            continue;
-        }
+        let start = std::time::Instant::now();
 
-        // Process message with the LLM provider
         let provider_label = state
             .config
             .lock()
@@ -93,75 +130,78 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
             "model": state.model,
         }));
 
-        // Simple single-turn chat (no streaming for now — use provider.chat_with_system)
-        let system_prompt = {
-            let config_guard = state.config.lock();
-            crate::channels::build_system_prompt(
-                &config_guard.workspace_dir,
-                &state.model,
-                &[],
-                &[],
-                Some(&config_guard.identity),
-                None,
-            )
-        };
+        // Run agent with cancellation support
+        let cancel_token = cancel.clone();
+        let agent_fut = super::run_gateway_chat_with_tools(&state, &content);
 
-        let messages = vec![
-            crate::providers::ChatMessage::system(system_prompt),
-            crate::providers::ChatMessage::user(&content),
-        ];
+        tokio::select! {
+            biased;
+            _ = cancel_token.cancelled() => {
+                let elapsed = start.elapsed();
+                super::gateway_file_log(&format!(
+                    "WS_RESPONSE status=cancelled duration={:.2}s",
+                    elapsed.as_secs_f64(),
+                ));
 
-        let multimodal_config = state.config.lock().multimodal.clone();
-        let prepared =
-            match crate::multimodal::prepare_messages_for_provider(&messages, &multimodal_config)
-                .await
-            {
-                Ok(p) => p,
-                Err(e) => {
-                    let err = serde_json::json!({
-                        "type": "error",
-                        "message": format!("Multimodal prep failed: {e}")
-                    });
-                    let _ = sender.send(Message::Text(err.to_string().into())).await;
-                    continue;
-                }
-            };
+                let msg = serde_json::json!({"type": "cancelled"});
+                let _ = sender.send(Message::Text(msg.to_string().into())).await;
 
-        match state
-            .provider
-            .chat_with_history(&prepared.messages, &state.model, state.temperature)
-            .await
-        {
-            Ok(response) => {
-                // Send the full response as a done message
-                let done = serde_json::json!({
-                    "type": "done",
-                    "full_response": response,
-                });
-                let _ = sender.send(Message::Text(done.to_string().into())).await;
-
-                // Broadcast agent_end event
                 let _ = state.event_tx.send(serde_json::json!({
-                    "type": "agent_end",
+                    "type": "agent_cancelled",
                     "provider": provider_label,
                     "model": state.model,
                 }));
-            }
-            Err(e) => {
-                let sanitized = crate::providers::sanitize_api_error(&e.to_string());
-                let err = serde_json::json!({
-                    "type": "error",
-                    "message": sanitized,
-                });
-                let _ = sender.send(Message::Text(err.to_string().into())).await;
 
-                // Broadcast error event
-                let _ = state.event_tx.send(serde_json::json!({
-                    "type": "error",
-                    "component": "ws_chat",
-                    "message": sanitized,
-                }));
+                break;
+            }
+            result = agent_fut => {
+                match result {
+                    Ok(response) => {
+                        let done = serde_json::json!({
+                            "type": "done",
+                            "full_response": response,
+                        });
+                        let _ = sender.send(Message::Text(done.to_string().into())).await;
+
+                        let elapsed = start.elapsed();
+                        super::gateway_file_log(&format!(
+                            "WS_RESPONSE status=200 duration={:.2}s model={} response={}",
+                            elapsed.as_secs_f64(),
+                            state.model,
+                            response
+                        ));
+
+                        let _ = state.event_tx.send(serde_json::json!({
+                            "type": "agent_end",
+                            "provider": provider_label,
+                            "model": state.model,
+                        }));
+                    }
+                    Err(e) => {
+                        let sanitized = crate::providers::sanitize_api_error(&e.to_string());
+                        let err = serde_json::json!({
+                            "type": "error",
+                            "message": sanitized,
+                        });
+                        let _ = sender.send(Message::Text(err.to_string().into())).await;
+
+                        let elapsed = start.elapsed();
+                        super::gateway_file_log(&format!(
+                            "WS_RESPONSE status=500 duration={:.2}s error={}",
+                            elapsed.as_secs_f64(),
+                            sanitized
+                        ));
+
+                        let _ = state.event_tx.send(serde_json::json!({
+                            "type": "error",
+                            "component": "ws_chat",
+                            "message": sanitized,
+                        }));
+                    }
+                }
             }
         }
     }
+
+    recv_handle.abort();
 }
