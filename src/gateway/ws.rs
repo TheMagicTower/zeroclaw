@@ -21,6 +21,7 @@ use axum::{
 };
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 use tokio_util::sync::CancellationToken;
 
 #[derive(Deserialize)]
@@ -46,11 +47,16 @@ pub async fn handle_ws_chat(
         }
     }
 
-    ws.on_upgrade(move |socket| handle_socket(socket, state))
+    let token_hash = {
+        let raw = params.token.as_deref().unwrap_or("");
+        format!("{:x}", Sha256::digest(raw.as_bytes()))
+    };
+
+    ws.on_upgrade(move |socket| handle_socket(socket, state, token_hash))
         .into_response()
 }
 
-async fn handle_socket(socket: WebSocket, state: AppState) {
+async fn handle_socket(socket: WebSocket, state: AppState, token_hash: String) {
     let (mut sender, mut receiver) = socket.split();
 
     // Channel for forwarding non-cancel messages from the receiver task
@@ -114,6 +120,12 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
 
         super::gateway_file_log(&format!("WS_REQUEST  message={content}"));
 
+        // Record user message in history
+        state.chat_history.push(
+            &token_hash,
+            super::history::HistoryEntry::new("user", &content),
+        );
+
         let start = std::time::Instant::now();
 
         let provider_label = state
@@ -157,6 +169,12 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
             result = agent_fut => {
                 match result {
                     Ok(response) => {
+                        // Record assistant response in history
+                        state.chat_history.push(
+                            &token_hash,
+                            super::history::HistoryEntry::new("assistant", &response),
+                        );
+
                         let done = serde_json::json!({
                             "type": "done",
                             "full_response": response,

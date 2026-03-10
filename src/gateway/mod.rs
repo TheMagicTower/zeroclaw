@@ -8,6 +8,7 @@
 //! - Header sanitization (handled by axum/hyper)
 
 pub mod api;
+pub mod history;
 pub mod sse;
 pub mod static_files;
 pub mod ws;
@@ -331,6 +332,8 @@ pub struct AppState {
     pub cost_tracker: Option<Arc<CostTracker>>,
     /// SSE broadcast channel for real-time events
     pub event_tx: tokio::sync::broadcast::Sender<serde_json::Value>,
+    /// Per-token chat history store
+    pub chat_history: Arc<history::ChatHistory>,
 }
 
 /// Run the HTTP gateway using axum with proper HTTP/1.1 compliance.
@@ -666,6 +669,7 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
         tools_registry,
         cost_tracker,
         event_tx,
+        chat_history: Arc::new(history::ChatHistory::new()),
     };
 
     // Config PUT needs larger body limit (1MB)
@@ -704,6 +708,8 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
         .route("/api/cost", get(api::handle_api_cost))
         .route("/api/cli-tools", get(api::handle_api_cli_tools))
         .route("/api/health", get(api::handle_api_health))
+        .route("/api/history", get(api::handle_api_history_get))
+        .route("/api/history", delete(api::handle_api_history_delete))
         // ── SSE event stream ──
         .route("/api/events", get(sse::handle_sse_events))
         // ── WebSocket agent chat ──
@@ -976,6 +982,21 @@ async fn handle_webhook(
 
     let message = &webhook_body.message;
 
+    // ── History: compute token hash for per-client storage ──
+    let token_hash = {
+        let raw_token = headers
+            .get(header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|a| a.strip_prefix("Bearer "))
+            .unwrap_or("");
+        use sha2::{Digest, Sha256};
+        format!("{:x}", Sha256::digest(raw_token.as_bytes()))
+    };
+    state.chat_history.push(
+        &token_hash,
+        history::HistoryEntry::new("user", message),
+    );
+
     // ── Gateway request/response file logging ──
     let log_peer = peer_addr.ip();
     gateway_file_log(&format!(
@@ -1047,6 +1068,12 @@ async fn handle_webhook(
                 state.model,
                 truncate_with_ellipsis(&response, 500),
             ));
+            // Record assistant response in history
+            state.chat_history.push(
+                &token_hash,
+                history::HistoryEntry::new("assistant", &response),
+            );
+
             let body = serde_json::json!({"response": response, "model": state.model});
             (StatusCode::OK, Json(body))
         }
@@ -1639,6 +1666,7 @@ mod tests {
             tools_registry: Arc::new(Vec::new()),
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
+            chat_history: Arc::new(history::ChatHistory::new()),
         };
 
         let response = handle_metrics(State(state)).await.into_response();
@@ -1688,6 +1716,7 @@ mod tests {
             tools_registry: Arc::new(Vec::new()),
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
+            chat_history: Arc::new(history::ChatHistory::new()),
         };
 
         let response = handle_metrics(State(state)).await.into_response();
@@ -2054,6 +2083,7 @@ mod tests {
             tools_registry: Arc::new(Vec::new()),
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
+            chat_history: Arc::new(history::ChatHistory::new()),
         };
 
         let mut headers = HeaderMap::new();
@@ -2118,6 +2148,7 @@ mod tests {
             tools_registry: Arc::new(Vec::new()),
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
+            chat_history: Arc::new(history::ChatHistory::new()),
         };
 
         let headers = HeaderMap::new();
@@ -2194,6 +2225,7 @@ mod tests {
             tools_registry: Arc::new(Vec::new()),
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
+            chat_history: Arc::new(history::ChatHistory::new()),
         };
 
         let response = handle_webhook(
@@ -2242,6 +2274,7 @@ mod tests {
             tools_registry: Arc::new(Vec::new()),
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
+            chat_history: Arc::new(history::ChatHistory::new()),
         };
 
         let mut headers = HeaderMap::new();
@@ -2295,6 +2328,7 @@ mod tests {
             tools_registry: Arc::new(Vec::new()),
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
+            chat_history: Arc::new(history::ChatHistory::new()),
         };
 
         let mut headers = HeaderMap::new();
@@ -2353,6 +2387,7 @@ mod tests {
             tools_registry: Arc::new(Vec::new()),
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
+            chat_history: Arc::new(history::ChatHistory::new()),
         };
 
         let response = handle_nextcloud_talk_webhook(
@@ -2407,6 +2442,7 @@ mod tests {
             tools_registry: Arc::new(Vec::new()),
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
+            chat_history: Arc::new(history::ChatHistory::new()),
         };
 
         let mut headers = HeaderMap::new();

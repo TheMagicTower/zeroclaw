@@ -518,6 +518,44 @@ pub async fn handle_api_health(
     Json(serde_json::json!({"health": snapshot})).into_response()
 }
 
+// ── Chat History ────────────────────────────────────────────────
+
+/// GET /api/history — return chat history for the authenticated token.
+pub async fn handle_api_history_get(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Err(e) = require_auth(&state, &headers) {
+        return e.into_response();
+    }
+
+    let token_hash = token_hash_from_headers(&headers);
+    let messages = state.chat_history.get(&token_hash);
+    Json(serde_json::json!({ "messages": messages })).into_response()
+}
+
+/// DELETE /api/history — clear chat history for the authenticated token.
+pub async fn handle_api_history_delete(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Err(e) = require_auth(&state, &headers) {
+        return e.into_response();
+    }
+
+    let token_hash = token_hash_from_headers(&headers);
+    state.chat_history.clear(&token_hash);
+    Json(serde_json::json!({ "ok": true })).into_response()
+}
+
+/// Derive a SHA-256 hash from the bearer token in the Authorization header.
+/// Used as the key for per-client history storage.
+fn token_hash_from_headers(headers: &HeaderMap) -> String {
+    let token = extract_bearer_token(headers).unwrap_or("");
+    use sha2::{Digest, Sha256};
+    format!("{:x}", Sha256::digest(token.as_bytes()))
+}
+
 // ── Helpers ─────────────────────────────────────────────────────
 
 fn is_masked_secret(value: &str) -> bool {
